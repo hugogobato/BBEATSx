@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bbeatsx"
+version = "0.1.0"
+description = "Bayesian Basis Expansion Analysis for Time Series (BBEATSx): an interpretable trend+seasonality+generic BART decomposition with component-level calibrated uncertainty."
+readme = "bbeatsx/README.md"
+requires-python = ">=3.10"
+license = { text = "See repository LICENSE" }
+authors = [{ name = "Hugo Souto" }]
+dependencies = [
+    "numpy>=1.23",
+    "scipy>=1.9",
+]
+
+[project.optional-dependencies]
+# The production forest sampler. When absent, bbeatsx falls back to its numpy
+# reference backend (see bbeatsx/backend/_numpy_backend.py).
+stochtree = ["stochtree>=0.1"]
+pandas = ["pandas>=1.5"]
+plot = ["matplotlib>=3.5"]
+test = ["pytest>=7.0", "pandas>=1.5"]
+all = ["stochtree>=0.1", "pandas>=1.5", "matplotlib>=3.5", "pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+include = ["bbeatsx*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

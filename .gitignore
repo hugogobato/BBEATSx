@@ -1,0 +1,22 @@
+/BART_code
+/BAVART
+/NBEATSx_Code
+/NBEATSx_Paper
+/Literature_Review
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+decomposition.png
+
+BART_stochtree_example.ipynb
+BBEATS_research_concept.md
+BBEATSx_research_plan.md
+NBEATSx_neuralforecast_example.md
+Phase0_Positioning.md
+Phase1_Implementation.md

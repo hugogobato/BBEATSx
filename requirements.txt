@@ -1,0 +1,17 @@
+# BBEATSx reproducible environment (see bbeatsx/README.md).
+# Create the project venv and install with:
+#   python3 -m venv .venv && . .venv/bin/activate
+#   pip install -r requirements.txt
+#
+# stochtree provides the production C++ forest sampler. If it cannot be
+# installed, bbeatsx automatically falls back to its pure-numpy reference
+# backend (the rest of the stack is unchanged).
+
+numpy>=1.23
+scipy>=1.9
+pandas>=1.5
+scikit-learn
+pybind11
+pytest>=7.0
+matplotlib>=3.5
+stochtree
