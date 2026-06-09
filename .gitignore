@@ -3,6 +3,9 @@
 /NBEATSx_Code
 /NBEATSx_Paper
 /Literature_Review
+/epftoolbox-master
+/theory
+/simulations/simulation_plan.md
 
 # Python
 .venv/
@@ -20,3 +23,5 @@ BBEATSx_research_plan.md
 NBEATSx_neuralforecast_example.md
 Phase0_Positioning.md
 Phase1_Implementation.md
+BBEATSx_Phase2_plan.md
+
