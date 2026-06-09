@@ -234,8 +234,8 @@ def evaluate_component_fidelity(
     results = {}
     for name in ["trend", "seasonal", "generic"]:
         if name in true_comps and name in pred_comps:
-            tc = true_comps[name][offset:]
             pc = pred_comps[name]
+            tc = true_comps[name][offset : offset + pc.shape[0]]
             
             # Point-estimate RMSE (posterior mean)
             mean_pred = pc.mean(axis=1)
