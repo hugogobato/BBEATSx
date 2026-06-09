@@ -201,6 +201,20 @@ def compute_interval_score(actual: np.ndarray, samples: np.ndarray, level: float
     score = (hi - lo) + (2.0 / alpha) * (lo - actual) * (actual < lo) + (2.0 / alpha) * (actual - hi) * (actual > hi)
     return float(np.mean(score))
 
+def evaluate_forecast(actual: np.ndarray, fc_result, y_train: np.ndarray, level: float = 0.9) -> Dict[str, float]:
+    """Helper that evaluates a full battery of point and probabilistic forecast metrics."""
+    samples = fc_result.samples
+    mean_pred = fc_result.mean()
+    return {
+        "rmse": compute_rmse(actual, mean_pred),
+        "smape": compute_smape(actual, mean_pred),
+        "mase": compute_mase(actual, mean_pred, y_train),
+        "crps": compute_crps(actual, samples),
+        "pinball": compute_pinball_loss(actual, samples),
+        "coverage": compute_coverage(actual, samples, level=level),
+        "interval_score": compute_interval_score(actual, samples, level=level)
+    }
+
 
 # =====================================================================
 # 3. Component-level and Decomposition UQ Metrics - Plan §3.2
