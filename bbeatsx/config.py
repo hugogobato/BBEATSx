@@ -101,12 +101,32 @@ class TrendConfig:
       regression ``F_tr(t) = phi(t) @ beta`` -- extrapolation-safe (Lemma 2.3).
     - ``"tvp"``: time-varying coefficients ``beta_{k} = BART_k(z_tvp)`` with the
       model staying linear in ``phi(t)`` (the TVP-BART-inspired variant).
-    - ``"tree"``: a BART forest on engineered ``t``-features -- kept purely as
-      the extrapolation-failure ablation/foil.
+    - ``"tree"``: a BART forest on engineered ``t``-features -- **the
+      extrapolation-failure foil only**.  By Lemma 2.3.2 / Theorem 2.3.3
+      (``theory/23_extrapolation.md``) its forecast trend is *exactly constant
+      in the horizon* (every future point lands in the last training leaf), so
+      the posterior is certain of zero trend growth and bands do not widen.
+      Never select it for real forecasting -- the sampler emits a warning.
+
+    Extrapolation-fix knobs (WP-2.3 Prop 2.3.6 flag to Phase 1):
+
+    - ``deslope`` (**default True**): for ``spline`` mode the shipped design
+      ``[1, t, B_2..B_J]`` is *exactly* rank-deficient (clamped B-splines
+      reproduce linear functions), so the part of the in-sample slope carried by
+      the spline columns -- which freezes at the boundary and does **not**
+      extrapolate -- is split off from ``beta_1`` by the prior alone, capturing
+      only ``rho ~ 0.83`` of the true slope under defaults.  ``deslope`` applies
+      the per-draw de-sloping map ``varsigma`` (move each draw along the exact
+      design null space so the whole in-sample slope sits in ``beta_1``); the
+      in-sample fit/likelihood are identical, but extrapolation becomes
+      slope-consistent.  Set ``False`` only to reproduce the leakage for the
+      capture-ratio ablation (verification hook 1).
     """
 
     mode: TrendMode = "spline"
-    # Linear/poly degree (used when mode == "linear").
+    # Linear/poly degree (used when mode == "linear").  Keep at 1: degree >= 2
+    # amplifies extrapolation variance as (1 + delta)^(2*degree) (Thm 2.3.7
+    # remark ii); the sampler warns if a higher degree is requested.
     degree: int = 1
     # B-spline settings (used when mode == "spline").
     n_knots: int = 10
@@ -115,6 +135,16 @@ class TrendConfig:
     coef_scale: float = 10.0
     # Random-walk smoothing prior strength for P-spline (penalizes 2nd diffs).
     smoothing: float = 1.0
+    # Per-draw de-sloping of the spline trend (WP-2.3 fix F2); no-op for other
+    # modes and whenever the design is full rank.
+    deslope: bool = True
+    # TVP only: learn the random-walk innovation variance ``rw_var`` under an
+    # inverse-gamma hyperprior instead of fixing it to coef_scale^2*smoothing/n
+    # (WP-2.3 flag 4; feeds WP-2.4b calibration).
+    learn_rw_var: bool = False
+    # Inverse-gamma shape for the rw_var hyperprior (scale defaults so the prior
+    # mean equals the fixed coef_scale^2*smoothing/n mapping).
+    rw_var_prior_a: float = 3.0
     # Forest prior used only when mode in {"tree", "tvp"}.
     tree_prior: TreePrior = field(
         default_factory=lambda: TreePrior(num_trees=50, beta=2.0)

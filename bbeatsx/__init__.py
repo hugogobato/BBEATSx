@@ -22,6 +22,11 @@ from .config import (
     TreePrior,
     TrendConfig,
 )
+from .diagnostics import (
+    capture_ratio_curve,
+    empirical_capture_ratio,
+    predicted_capture_ratio,
+)
 from .features import FeatureBuilder, FeatureSet
 from .forecast import ForecastResult, Forecaster
 from .model import BBEATSx, make_config
@@ -45,4 +50,7 @@ __all__ = [
     "BBEATSxSampler",
     "Forecaster",
     "ForecastResult",
+    "predicted_capture_ratio",
+    "capture_ratio_curve",
+    "empirical_capture_ratio",
 ]

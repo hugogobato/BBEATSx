@@ -33,11 +33,14 @@ def make_config(
     errors: str = "homo",
     asymmetric: bool = True,
     sum_to_zero: bool = True,
+    deslope: bool = True,
+    learn_rw_var: bool = False,
     num_gfr: int = 10,
     num_burnin: int = 200,
     num_mcmc: int = 500,
     thin: int = 1,
     seed: int = 0,
+    num_threads: int = 1,
 ) -> BBEATSxConfig:
     """Convenience builder for a :class:`BBEATSxConfig`.
 
@@ -53,14 +56,15 @@ def make_config(
         else:
             sp.append(SeasonalPeriod(float(p)))
     return BBEATSxConfig(
-        trend=TrendConfig(mode=trend),
+        trend=TrendConfig(mode=trend, deslope=deslope, learn_rw_var=learn_rw_var),
         seasonal=SeasonalConfig(periods=sp, calendar=list(calendar),
                                 sum_to_zero=sum_to_zero),
         generic=GenericConfig(lags=tuple(lags), exog=list(exog),
                               future_exog=list(future_exog), asymmetric=asymmetric),
         errors=ErrorConfig(mode=errors),
         mcmc=MCMCConfig(num_gfr=num_gfr, num_burnin=num_burnin,
-                        num_mcmc=num_mcmc, thin=thin, seed=seed),
+                        num_mcmc=num_mcmc, thin=thin, seed=seed,
+                        num_threads=num_threads),
     )
 
 

@@ -154,13 +154,16 @@ class ConjugateTrendBlock:
     """
 
     def __init__(self, Phi: np.ndarray, penalty_mask: np.ndarray,
-                 coef_scale: float, smoothing: float) -> None:
+                 coef_scale: float, smoothing: float,
+                 deslope: bool = False) -> None:
         self.Phi = np.ascontiguousarray(np.asarray(Phi, dtype=float))
         if self.Phi.ndim == 1:
             self.Phi = self.Phi[:, None]
         self.n, self.p = self.Phi.shape
         self.beta = np.zeros(self.p)
         self.draws: list = []
+        self.deslope = bool(deslope)
+        self._desloped = False
 
         prior_prec = np.eye(self.p) / (coef_scale ** 2)
         pen_idx = np.where(np.asarray(penalty_mask, dtype=bool))[0]
@@ -213,6 +216,42 @@ class ConjugateTrendBlock:
         B = np.column_stack(self.draws) if self.draws else np.zeros((self.p, 0))
         return self.Phi @ B
 
+    def apply_deslope(self) -> None:
+        """De-sloping map ``varsigma`` (WP-2.3 Prop 2.3.6 fix F2).
+
+        The shipped spline design ``[1, t, B_2..B_J]`` has an exact 1-d null
+        space ``v`` (clamped B-splines reproduce ``t``), so the in-sample slope
+        is split between ``beta_1`` -- the only channel that *extrapolates* --
+        and the spline columns, which freeze at the boundary.  The prior alone
+        sets that split, capturing only ``rho ~ 0.83`` of the true slope.
+
+        This moves each retained draw along ``v`` until the explicit-slope
+        coordinate ``beta_1`` equals the draw's *total* in-sample OLS slope.
+        Because ``Phi @ v = 0`` the in-sample fit, likelihood, and joint
+        predictions are unchanged (``in_sample_draws`` is invariant); only the
+        out-of-sample extrapolation changes -- now slope-consistent.  No-op when
+        the design is full rank (e.g. ``linear`` mode) or already applied.
+        """
+        if self._desloped or not self.deslope or not self.draws or self.p < 2:
+            return
+        # Exact null direction of the in-sample design (1-d for the shipped
+        # spline; absent for full-rank designs).
+        _, sv, Vt = np.linalg.svd(self.Phi, full_matrices=False)
+        tol = sv[0] * max(self.Phi.shape) * np.finfo(float).eps
+        v = Vt[-1]
+        if sv[-1] > tol or abs(v[1]) < 1e-12:
+            self._desloped = True            # nothing to fix
+            return
+        # OLS-slope functional on [1, t] (columns 0,1), as a row acting on beta.
+        L = self.Phi[:, :2]
+        slope_row = np.linalg.solve(L.T @ L, L.T)[1]     # (n,)
+        slope_op = slope_row @ self.Phi                  # (p,)  s_tot = slope_op @ beta
+        for i, beta in enumerate(self.draws):
+            s_tot = float(slope_op @ beta)
+            lam = (s_tot - beta[1]) / v[1]               # set beta_1 -> s_tot
+            self.draws[i] = beta + lam * v
+        self._desloped = True
+
     def current_prediction(self) -> np.ndarray:
         return self.Phi @ self.beta
 
@@ -231,7 +270,9 @@ class TVPTrendBlock:
     amplitudes -- and their uncertainty -- evolve.
     """
 
-    def __init__(self, Phi: np.ndarray, rw_var: float, init_var: float = 100.0) -> None:
+    def __init__(self, Phi: np.ndarray, rw_var: float, init_var: float = 100.0,
+                 learn_rw_var: bool = False, prior_a: float = 3.0,
+                 prior_b: Optional[float] = None) -> None:
         self.Phi = np.ascontiguousarray(np.asarray(Phi, dtype=float))
         if self.Phi.ndim == 1:
             self.Phi = self.Phi[:, None]
@@ -243,6 +284,14 @@ class TVPTrendBlock:
         self.beta_path = np.zeros((self.n, self.d))
         self.beta_T_draws: list = []     # terminal state per kept draw (for forecast)
         self.path_draws: list = []       # full in-sample path per kept draw
+        # Optional inverse-gamma hyperprior on the rw innovation variance
+        # (WP-2.3 flag 4).  Prior scale defaults so the prior *mean*
+        # b/(a-1) equals the fixed coef_scale^2*smoothing/n mapping.
+        self.learn_rw_var = bool(learn_rw_var)
+        self.prior_a = float(prior_a)
+        self.prior_b = (float(prior_b) if prior_b is not None
+                        else max(prior_a - 1.0, 1e-6) * self.rw_var)
+        self.rw_var_draws: list = []     # per-kept-draw rw_var (forecast uses these)
 
     def _current_pred(self) -> np.ndarray:
         return np.einsum("td,td->t", self.Phi, self.beta_path)
@@ -286,10 +335,21 @@ class TVPTrendBlock:
             cov = Cs[t] - J @ Rm @ J.T
             beta[t] = gen.multivariate_normal(mean, _sym(cov))
         self.beta_path = beta
+
+        # ---- optional inverse-gamma update of the rw innovation variance
+        if self.learn_rw_var:
+            diffs = beta[1:] - beta[:-1]                 # (n-1, d) innovations eta_t
+            ssq = float(np.sum(diffs ** 2))
+            a_post = self.prior_a + 0.5 * (self.n - 1) * self.d
+            b_post = self.prior_b + 0.5 * ssq
+            self.rw_var = float(1.0 / gen.gamma(a_post, 1.0 / b_post))
+            self.W = np.eye(self.d) * self.rw_var
+
         residual.subtract_vector(self._current_pred())
         if keep:
             self.beta_T_draws.append(beta[-1].copy())
             self.path_draws.append(self._current_pred().copy())
+            self.rw_var_draws.append(self.rw_var)
 
     def predict_new(self, Phi_new: np.ndarray, np_rng=None) -> np.ndarray:
         """Roll ``beta_T`` forward under the random walk for each kept draw."""
@@ -302,8 +362,10 @@ class TVPTrendBlock:
         gen = np_rng if np_rng is not None else np.random.default_rng(0)
         for s in range(S):
             b = self.beta_T_draws[s].copy()
+            rw = (self.rw_var_draws[s] if self.rw_var_draws else self.rw_var)
+            sd = np.sqrt(rw)
             for step in range(h):
-                b = b + gen.normal(0.0, np.sqrt(self.rw_var), size=self.d)
+                b = b + gen.normal(0.0, sd, size=self.d)
                 out[step, s] = Phi_new[step] @ b
         return out
 

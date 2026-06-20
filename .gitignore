@@ -6,6 +6,12 @@
 /epftoolbox-master
 /theory
 /simulations/simulation_plan.md
+/simulations
+/real_life_application/BE
+/real_life_application/DE
+/real_life_application/FR
+/real_life_application/NP
+/real_life_application/PJM
 
 # Python
 .venv/

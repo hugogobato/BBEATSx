@@ -19,6 +19,7 @@ state, which the forecaster (:mod:`bbeatsx.forecast`) and interpretability tools
 
 from __future__ import annotations
 
+import warnings
 from typing import List, Optional
 
 import numpy as np
@@ -91,13 +92,30 @@ class BBEATSxSampler:
     def _build_trend(self):
         tc = self.config.trend
         if tc.mode in ("linear", "spline"):
+            if tc.mode == "linear" and tc.degree >= 2:
+                warnings.warn(
+                    f"trend mode='linear' with degree={tc.degree} >= 2 amplifies "
+                    "extrapolation variance as (1+delta)^(2*degree) (WP-2.3 "
+                    "Thm 2.3.7 remark ii); degree=1 is recommended unless the "
+                    "truth's tail is known polynomial.", stacklevel=2)
+            # De-sloping (fix F2) only bites on the rank-deficient spline design.
+            deslope = tc.deslope and tc.mode == "spline"
             return ConjugateTrendBlock(self.fs.X_tr, self.fs.trend_penalty_cols,
-                                       tc.coef_scale, tc.smoothing)
+                                       tc.coef_scale, tc.smoothing, deslope=deslope)
         if tc.mode == "tvp":
-            # Map the smoothing knob to a random-walk innovation variance.
+            # Map the smoothing knob to a random-walk innovation variance (the
+            # prior mean when the rw_var hyperprior is learned).
             rw_var = (tc.coef_scale ** 2) / max(self.n, 1) * tc.smoothing
-            return TVPTrendBlock(self.fs.X_tr, rw_var=max(rw_var, 1e-6))
-        # tree mode -> forest foil (expected to flatline on extrapolation)
+            return TVPTrendBlock(self.fs.X_tr, rw_var=max(rw_var, 1e-6),
+                                 learn_rw_var=tc.learn_rw_var,
+                                 prior_a=tc.rw_var_prior_a)
+        # tree mode -> forest foil; its forecast trend is constant in the horizon
+        # by construction (WP-2.3 Lemma 2.3.2): an ablation foil, not a forecaster.
+        warnings.warn(
+            "trend mode='tree' is the extrapolation-failure foil: its forecast "
+            "trend is exactly constant in the horizon (WP-2.3 Lemma 2.3.2 / "
+            "Thm 2.3.3) and bands do not widen. Use 'spline'/'linear'/'tvp' for "
+            "real forecasting.", stacklevel=2)
         return ForestBlock("trend", self.fs.X_tr, tc.tree_prior,
                            self.global_config, self.sv_mode, self.fs.names_tr)
 
@@ -134,7 +152,7 @@ class BBEATSxSampler:
         self._set_obs_variance()
         for b in self.blocks:
             b.sample(self.residual, self.global_config, self.rng, self.np_rng,
-                     keep, gfr)
+                     keep, gfr, self.config.mcmc.num_threads)
         # error model on the full residual r = z - sum(F_c)
         if self.sv_mode:
             eps = np.asarray(self.residual.get_residual()).ravel()
@@ -160,6 +178,10 @@ class BBEATSxSampler:
             self._sweep(gfr=False, keep=False)
         for i in range(mc.num_mcmc):
             self._sweep(gfr=False, keep=(i % mc.thin == 0))
+        # De-sloping map varsigma on the conjugate spline trend (WP-2.3 fix F2):
+        # in-sample-invariant, restores extrapolation slope-consistency.
+        if isinstance(self.trend_block, ConjugateTrendBlock):
+            self.trend_block.apply_deslope()
         self._fitted = True
         return self
 

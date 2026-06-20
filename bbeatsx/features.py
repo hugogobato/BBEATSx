@@ -149,6 +149,13 @@ class FeatureBuilder:
         extrapolating slope -- giving linear (not cubic) extrapolation beyond the
         observed range, which is the extrapolation-safe behaviour of plan §3.6 /
         Lemma 2.3.
+
+        Note (WP-2.3 Prop 2.3.6): clamped B-splines reproduce linear functions,
+        so this design ``[1, t, B_2..B_J]`` is *exactly* rank-deficient in-sample
+        (1-d null space).  The in-sample fit is unaffected, but the share of the
+        slope that lands in the spline columns *freezes* at the boundary and does
+        not extrapolate -- the sampler's de-sloping map (``ConjugateTrendBlock.
+        apply_deslope``, enabled by ``TrendConfig.deslope``) repairs this.
         """
         t_norm = np.asarray(t_norm, dtype=float).ravel()
         n = t_norm.shape[0]
@@ -192,7 +199,10 @@ class FeatureBuilder:
             penalty = np.zeros(X.shape[1], dtype=bool)
             return X, names, penalty
 
-        # tree mode feeds engineered t-features to a forest (the foil).
+        # tree mode feeds engineered t-features to a forest (the foil).  Both
+        # features are coordinatewise increasing in t, so every future point
+        # lands in the last training leaf: the forecast trend is *constant in the
+        # horizon* (WP-2.3 Lemma 2.3.2) -- ablation foil only, not a forecaster.
         cols = [t_norm]
         names = ["trend_t"]
         # A couple of low-order powers give the tree more to split on.
