@@ -13,6 +13,12 @@
 /real_life_application/NP
 /real_life_application/PJM
 
+/real_life_application_v2/BE
+/real_life_application_v2/DE
+/real_life_application_v2/FR
+/real_life_application_v2/NP
+/real_life_application_v2/PJM
+
 # Python
 .venv/
 __pycache__/

@@ -116,6 +116,24 @@ class BBEATSx:
         return self.forecaster_.forecast(horizon, exog_future=exog_future,
                                          time_future=time_future)
 
+    def forecast_from_origin(self, y_history, horizon: int,
+                             exog_future: Optional[Dict] = None,
+                             exog_history: Optional[Dict] = None,
+                             time_future=None, time_history=None,
+                             sv_filter_window: int = 256) -> ForecastResult:
+        """Re-anchored forecast with frozen draws (no refit).
+
+        Forecast ``horizon`` steps from the end of ``y_history`` using the
+        parameters sampled at :meth:`fit` time. Enables periodic-recalibration
+        protocols (fit once, then roll the forecast origin across realised data).
+        See :meth:`Forecaster.forecast_from_origin`.
+        """
+        self._check_fitted()
+        return self.forecaster_.forecast_from_origin(
+            y_history, horizon, exog_future=exog_future,
+            exog_history=exog_history, time_future=time_future,
+            time_history=time_history, sv_filter_window=sv_filter_window)
+
     def predict(self, horizon: int, **kwargs) -> np.ndarray:
         """Posterior-mean point forecast (convenience over :meth:`forecast`)."""
         return self.forecast(horizon, **kwargs).mean()
