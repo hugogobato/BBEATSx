@@ -1,6 +1,6 @@
 """Feature construction for BBEATSx (plan §1.1).
 
-Builds three *disjoint* feature groups, one per additive block:
+Builds routed feature groups for the additive blocks:
 
 - **trend** ``X_tr``  : a basis ``phi(t)`` over a normalized time index
   (polynomial for ``linear``, an extrapolation-safe P-spline design for
@@ -9,16 +9,18 @@ Builds three *disjoint* feature groups, one per additive block:
 - **seasonal** ``X_se`` : Fourier harmonics ``sin/cos(2*pi*k*t/p)`` plus optional
   calendar one-hots.  All known into the future, so the block extrapolates
   safely.
-- **generic** ``X_ge`` : autoregressive lags ``y_{t-l}`` and exogenous covariates.
+- **generic** ``X_ge`` : the legacy concatenation of autoregressive lags and
+  exogenous covariates.
+- **autoregressive / exogenous** ``X_ar`` / ``X_ex`` : separate views used by
+  the opt-in four-component layout.
 
 The :class:`FeatureBuilder` also knows how to assemble a *single future row* given
 a rolled-forward history -- the primitive the recursive forecaster (§1.3) calls
 draw-by-draw.
 
-Disjointness (concept §3.5, plan §1.1) is enforced structurally: the trend and
-seasonal column sources are physically distinct from the generic column sources,
-and :meth:`FeatureBuilder.assert_disjoint` verifies no time-only feature leaked
-into the generic block.
+Feature *routing* is enforced structurally.  This is deliberately not called an
+information-disjointness guarantee: a raw lag of ``y`` contains past trend,
+seasonality, and exogenous signal even though its column name is distinct.
 """
 
 from __future__ import annotations
@@ -44,14 +46,15 @@ class FeatureSet:
 
     Attributes
     ----------
-    X_tr, X_se, X_ge : np.ndarray
-        ``(n_eff, p_c)`` design matrices for trend / seasonal / generic blocks.
+    X_tr, X_se, X_ge, X_ex, X_ar : np.ndarray
+        ``(n_eff, p_c)`` design matrices for trend, seasonal, legacy generic,
+        exogenous, and autoregressive blocks. ``X_ge=[X_ar, X_ex]``.
     y : np.ndarray
         Targets aligned to the design matrices (initial rows without full lag
         history are dropped).
     t_index : np.ndarray
         Raw integer time index of each retained row.
-    names_tr, names_se, names_ge : list of str
+    names_tr, names_se, names_ge, names_ex, names_ar : list of str
         Column names per block (for interpretability / split-frequency reports).
     trend_penalty_cols : np.ndarray
         Boolean mask over ``X_tr`` columns marking spline columns subject to the
@@ -63,11 +66,15 @@ class FeatureSet:
     X_tr: np.ndarray
     X_se: np.ndarray
     X_ge: np.ndarray
+    X_ex: np.ndarray
+    X_ar: np.ndarray
     y: np.ndarray
     t_index: np.ndarray
     names_tr: List[str]
     names_se: List[str]
     names_ge: List[str]
+    names_ex: List[str]
+    names_ar: List[str]
     trend_penalty_cols: np.ndarray
     row_offset: int
 
@@ -254,33 +261,57 @@ class FeatureBuilder:
             return np.zeros((t_raw.shape[0], 0)), []
         return np.column_stack(cols), names
 
-    # ----------------------------------------------------------- generic block
-    def _generic_design(
+    # ----------------------------------------------- autoregressive / exogenous
+    def _autoregressive_design(
         self,
         y_full: np.ndarray,
-        exog: Dict[str, np.ndarray],
         start: int,
         stop: int,
     ) -> Tuple[np.ndarray, List[str]]:
-        """Build generic features for rows ``start:stop`` of the full series.
-
-        Lags index into ``y_full`` (which must contain enough history before
-        ``start``); exogenous columns are sliced ``start:stop``.
-        """
+        """Build raw-outcome lag features for rows ``start:stop``."""
         cols: List[np.ndarray] = []
         names: List[str] = []
         idx = np.arange(start, stop)
         for lag in self.generic.lags:
             cols.append(y_full[idx - lag])
             names.append(f"y_lag{lag}")
+        if not cols:
+            return np.zeros((stop - start, 0)), []
+        return np.column_stack(cols), names
+
+    def _exogenous_design(
+        self,
+        exog: Dict[str, np.ndarray],
+        start: int,
+        stop: int,
+    ) -> Tuple[np.ndarray, List[str]]:
+        """Build observed/known-future exogenous features for ``start:stop``."""
+        cols: List[np.ndarray] = []
+        names: List[str] = []
+        idx = np.arange(start, stop)
         for name in list(self.generic.exog) + list(self.generic.future_exog):
             if name not in exog:
-                raise ValueError(f"generic exogenous column '{name}' not provided")
+                raise ValueError(f"exogenous column '{name}' not provided")
             cols.append(exog[name][idx])
             names.append(f"x_{name}")
         if not cols:
             return np.zeros((stop - start, 0)), []
         return np.column_stack(cols), names
+
+    def _generic_design(
+        self,
+        y_full: np.ndarray,
+        exog: Dict[str, np.ndarray],
+        start: int,
+        stop: int,
+    ) -> Tuple[np.ndarray, List[str], np.ndarray, List[str], np.ndarray, List[str]]:
+        """Build legacy and split views, preserving lag-then-exog ordering."""
+        X_ar, names_ar = self._autoregressive_design(y_full, start, stop)
+        X_ex, names_ex = self._exogenous_design(exog, start, stop)
+        nonempty = [X for X in (X_ar, X_ex) if X.shape[1] > 0]
+        X_ge = (np.column_stack(nonempty) if nonempty
+                else np.zeros((stop - start, 0)))
+        return X_ge, names_ar + names_ex, X_ex, names_ex, X_ar, names_ar
 
     # ------------------------------------------------------------------ public
     def fit_transform(
@@ -310,11 +341,17 @@ class FeatureBuilder:
 
         X_tr, names_tr, penalty = self._trend_design(t_norm)
         X_se, names_se = self._seasonal_design(t_raw, time_slice)
-        X_ge, names_ge = self._generic_design(y, exog_d, start, stop)
+        X_ge, names_ge, X_ex, names_ex, X_ar, names_ar = self._generic_design(
+            y, exog_d, start, stop)
 
-        # Sum-to-zero centering of the seasonal block (concept §3.5): subtract
-        # in-sample column means so the seasonal component carries no level (the
-        # trend intercept absorbs it). The same shift is applied to future rows.
+        # Centering of the seasonal *design columns* (concept §3.5): subtract
+        # in-sample column means; the same shift is applied to future rows so the
+        # basis is consistent.  Note this does **not** by itself make the seasonal
+        # *component* mean-zero: a sum-of-trees on centered features still has an
+        # arbitrary output level coming from its leaf values.  Identification of
+        # the level is handled after sampling by the ``level_gauge`` convention
+        # (:meth:`BBEATSxSampler._fix_level_gauge`), which constrains the block
+        # output rather than its inputs.
         if self.seasonal.sum_to_zero and X_se.shape[1] > 0:
             self.seasonal_means_ = X_se.mean(axis=0)
             X_se = X_se - self.seasonal_means_
@@ -322,13 +359,14 @@ class FeatureBuilder:
             self.seasonal_means_ = None
 
         fs = FeatureSet(
-            X_tr=X_tr, X_se=X_se, X_ge=X_ge,
+            X_tr=X_tr, X_se=X_se, X_ge=X_ge, X_ex=X_ex, X_ar=X_ar,
             y=y[start:stop], t_index=t_raw.astype(int),
             names_tr=names_tr, names_se=names_se, names_ge=names_ge,
+            names_ex=names_ex, names_ar=names_ar,
             trend_penalty_cols=penalty, row_offset=start,
         )
         self._fitted = True
-        self.assert_disjoint(fs)
+        self.assert_feature_routing(fs)
         return fs
 
     def build_future_row(
@@ -414,11 +452,33 @@ class FeatureBuilder:
         return (np.array(cols, dtype=float).reshape(1, -1) if cols
                 else np.zeros((1, 0)))
 
-    def assert_disjoint(self, fs: FeatureSet) -> None:
-        """Guarantee no trend/seasonal time feature leaked into the generic block.
+    def future_autoregressive_row(
+        self, t_raw: int, y_history: np.ndarray,
+    ) -> np.ndarray:
+        """Raw-outcome lag row for the autoregressive predictive block."""
+        cols = [float(y_history[t_raw - lag]) for lag in self.generic.lags]
+        return (np.asarray(cols, dtype=float).reshape(1, -1) if cols
+                else np.zeros((1, 0)))
 
-        The generic block may only contain ``y_lag*`` and ``x_*`` columns; any
-        ``trend_*``/``sin_``/``cos_``/``cal_`` name appearing there is a bug.
+    def future_exogenous_row(
+        self, exog_future: Optional[Dict[str, float]] = None,
+    ) -> np.ndarray:
+        """One future row for the external-covariate block."""
+        exog_future = exog_future or {}
+        cols: List[float] = []
+        for name in list(self.generic.exog) + list(self.generic.future_exog):
+            if name not in exog_future:
+                raise ValueError(f"future value for exogenous '{name}' not provided")
+            cols.append(float(exog_future[name]))
+        return (np.asarray(cols, dtype=float).reshape(1, -1) if cols
+                else np.zeros((1, 0)))
+
+    def assert_feature_routing(self, fs: FeatureSet) -> None:
+        """Guarantee columns were routed to the declared feature blocks.
+
+        This checks column provenance only.  It does *not* claim that the
+        resulting blocks are informationally disjoint, since ``y_lag*`` carries
+        past values of every structural component.
         """
         forbidden_prefixes = ("trend_", "sin_", "cos_", "cal_")
         bad = [nm for nm in fs.names_ge if nm.startswith(forbidden_prefixes)]
@@ -430,3 +490,11 @@ class FeatureBuilder:
         if not ok:
             raise AssertionError(
                 f"unexpected generic feature names: {fs.names_ge}")
+        if fs.names_ge != fs.names_ar + fs.names_ex:
+            raise AssertionError("legacy generic feature ordering must be AR then exog")
+        if fs.X_ge.shape[1] != fs.X_ar.shape[1] + fs.X_ex.shape[1]:
+            raise AssertionError("generic design must concatenate AR and exog designs")
+
+    def assert_disjoint(self, fs: FeatureSet) -> None:
+        """Backward-compatible alias for :meth:`assert_feature_routing`."""
+        self.assert_feature_routing(fs)

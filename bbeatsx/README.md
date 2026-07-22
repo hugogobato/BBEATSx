@@ -2,23 +2,29 @@
 
 **Bayesian Basis Expansion Analysis for Time Series (exogenous-capable).**
 
-An interpretable **trend + seasonality + generic** decomposition whose blocks are
-Bayesian Additive Regression Tree (BART) ensembles — plus an extrapolation-safe
-parametric trend — fit by **one coherent backfitting MCMC**, delivering calibrated
-predictive intervals **including per component**. This is Phase 1 of
+An interpretable additive decomposition with an extrapolation-safe parametric
+trend and Bayesian Additive Regression Tree (BART) correction blocks, fit by one
+shared-residual backfitting sampler. The original layout is **trend + seasonality
++ generic**. An opt-in layout separates the last term into **exogenous +
+autoregressive** contributions. Posterior component bands are reported, but their
+frequentist calibration is a scientific property to test, not an API guarantee.
+This is Phase 1 of
 `BBEATSx_research_plan.md` (the implementation phase).
 
 ```
 y_t = F_tr(t) + F_se(s_t) + F_ge(z_t) + eps_t
       \____/    \______/    \______/    \____/
       trend     seasonal     generic    SV or homoscedastic noise
+
+or, with `generic.component_layout="split"`,
+
+y_t = F_tr(t) + F_se(s_t) + F_x(x_t) + F_ar(y_{t-lags}) + eps_t.
 ```
 
-The decomposition is structural: each block can only split on its own disjoint
-feature group, the tree analogue of NBEATS's basis constraints. Because the model
-is Bayesian and all blocks share one residual stream and one error model, you get a
-posterior over **each component separately** — the property post-hoc conformal /
-quantile methods structurally cannot provide.
+The decomposition is feature-routed: each forest can split only on its assigned
+columns. This is not the same as statistical identification. In particular, raw
+outcome lags contain past trend, seasonality, exogenous signal, and noise, so the
+autoregressive block can still compete with the structural blocks.
 
 ---
 
@@ -36,12 +42,21 @@ API. The forest primitive is **pluggable**:
 
 | Backend | When used | Notes |
 |---|---|---|
-| `stochtree` | when `import stochtree` succeeds | production C++ sampler (grow/prune/change/swap, GFR/XBART init, multithreading) |
-| `numpy-reference` | fallback when `stochtree` is absent | self-contained pure-numpy BART (genuine grow/prune backfitting + conjugate leaves). Correct but **not** performance-optimized. |
+| `stochtree` | when `import stochtree` succeeds | production C++ sampler; recursive GFR warm start followed by grow/prune birth-death MCMC in the validated 0.4.4 release |
+| `numpy-reference` | fallback when `stochtree` is absent | experimental pure-NumPy grow/prune kernel with different initialization, split proposals, random-number stream, and optional leaf-variance convention |
 
-`bbeatsx.BACKEND` records which one is active. Force a choice with the
-`BBEATSX_BACKEND=stochtree|numpy` environment variable. **For real experiments,
-`pip install stochtree`** so the production sampler is used.
+The two implementations expose the same adapter API, but they are not known to
+target an identical finite-sample transition kernel. `bbeatsx.BACKEND` and
+`bbeatsx.BACKEND_VERSION` record which implementation produced a run. Force a
+choice with `BBEATSX_BACKEND=stochtree|numpy`. For manuscript experiments use
+the pinned `stochtree==0.4.4` backend and set the environment variable explicitly;
+use NumPy for tests, debugging, and independent conformance checks.
+
+The version pin matters. BBEATSx uses the low-level variance-weight interface,
+whose public documentation and compiled 0.4.4 Gaussian sufficient statistics do
+not describe the convention consistently. `tests/test_backend_variance_weights.py`
+therefore checks the convention against an analytic one-leaf posterior. Upgrade
+`stochtree` only after that contract and the posterior-equivalence tests pass.
 
 ---
 
@@ -73,6 +88,12 @@ dec = model.decomposition()      # in-sample component posterior bands
 imp = model.split_importance("generic")   # split-frequency importance (with UQ)
 ```
 
+For separate predictive attribution, pass `component_layout="split"` together
+with named exogenous columns. Forecast components will then be `trend`,
+`seasonal`, `exogenous`, and `autoregressive`. This static split is opt-in because
+it removes exogenous-lag interactions and is not, by itself, an identification or
+causal adjustment.
+
 See `examples/quickstart.py` for a fuller, plotted walk-through.
 
 ---
@@ -84,6 +105,7 @@ See `examples/quickstart.py` for a fuller, plotted walk-through.
 | `trend` | `spline` (default), `linear`, `tvp`, `tree` (foil) | §3.6, Lemma 2.3 |
 | `errors` | `homo` (default), `sv` | §0.2 |
 | `generic.asymmetric` | `True` (default) / `False` | §3.5 identifiability |
+| `generic.component_layout` | `combined` (default), `split` | predictive attribution experiment |
 | `seasonal.sum_to_zero` | `True` (default) / `False` | §3.5 |
 | `multistep` | `recursive` (default) | §0.5 |
 
@@ -122,8 +144,13 @@ PYTHONPATH=. pytest tests                      # auto: stochtree if installed, e
 BBEATSX_BACKEND=numpy PYTHONPATH=. pytest tests   # force the reference backend
 ```
 
-The suite passes on **both** backends (the `stochtree` C++ sampler runs it ~3-4x
-faster than the numpy reference).
+The deterministic and analytic contract tests pass on both backends. This does
+not establish that their full forest posteriors are equivalent. In an isolated
+DGP-1 benchmark at the study schedule, `stochtree` 0.4.4 was about 9.3 times
+faster than NumPy; the exact ratio is workload- and machine-dependent. The gain
+comes mainly from compiled tree traversal, partition tracking, cached predictions,
+and native storage. For small fits, increasing inner `num_threads` did not help,
+so parallel simulation workers should normally keep `num_threads=1`.
 
 Covers (plan §1.5): pure-linear-trend recovery in the low-noise limit, sinusoid
 recovery, the backfitting residual invariant (`z - sum_c F_c - r ~= 0`), noise
@@ -136,12 +163,13 @@ a deterministic golden run.
 ## Phase 1 status & deviations
 
 Implemented end-to-end: features, the Gibbs engine, recursive forecasting,
-interpretability, the estimator/adapters, serialization, and the test suite — all
-running on the numpy backend in this environment and ready to use the `stochtree`
-sampler when installed.
+interpretability, the estimator/adapters, serialization, backend provenance, and
+the test suite. Both the legacy combined layout and the opt-in static split are
+covered by regression tests.
 
 Honest deviations from the plan, all flagged for follow-up:
-1. **Backend** — production runs need `pip install stochtree` (see above).
+1. **Backend**: production runs require the pinned and explicitly selected
+   `stochtree` release. The NumPy backend remains an experimental comparator.
 2. **`tvp`** ships as the Gaussian random-walk-coefficient trend; the
    BART-coefficient version awaits leaf-regression support.
 3. **`multistep="direct"`** is not implemented (recursive is the plan's

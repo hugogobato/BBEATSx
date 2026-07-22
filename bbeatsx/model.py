@@ -28,11 +28,13 @@ def make_config(
     lags: Sequence[int] = (1,),
     exog: Sequence[str] = (),
     future_exog: Sequence[str] = (),
+    component_layout: str = "combined",
     calendar: Sequence[str] = (),
     trend: str = "spline",
     errors: str = "homo",
     asymmetric: bool = True,
     sum_to_zero: bool = True,
+    level_gauge: str = "trend",
     deslope: bool = True,
     learn_rw_var: bool = False,
     num_gfr: int = 10,
@@ -60,11 +62,14 @@ def make_config(
         seasonal=SeasonalConfig(periods=sp, calendar=list(calendar),
                                 sum_to_zero=sum_to_zero),
         generic=GenericConfig(lags=tuple(lags), exog=list(exog),
-                              future_exog=list(future_exog), asymmetric=asymmetric),
+                              future_exog=list(future_exog),
+                              component_layout=component_layout,
+                              asymmetric=asymmetric),
         errors=ErrorConfig(mode=errors),
         mcmc=MCMCConfig(num_gfr=num_gfr, num_burnin=num_burnin,
                         num_mcmc=num_mcmc, thin=thin, seed=seed,
                         num_threads=num_threads),
+        level_gauge=level_gauge,
     )
 
 
@@ -82,6 +87,7 @@ class BBEATSx:
         self.forecaster_: Optional[Forecaster] = None
         self.y_full_: Optional[np.ndarray] = None
         self.backend = bk.BACKEND
+        self.backend_version = bk.BACKEND_VERSION
 
     # ------------------------------------------------------------------- fit
     def fit(self, y: np.ndarray, time=None, exog=None) -> "BBEATSx":

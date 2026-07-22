@@ -32,7 +32,26 @@ def test_sv_end_to_end_runs():
     m = BBEATSx(cfg).fit(y)
     assert m.sampler_.num_draws == 60
     assert len(m.sampler_.sigma2_t_draws_) == 60
+    # F-2.4-1: the per-draw SV level must be stored with the retained draws.
+    assert len(m.sampler_.mu_draws_) == 60
+    assert np.std(m.sampler_.mu_draws_) > 0.0
+    # F-2.4-8: the exact-target MH step should be on by default and accept often.
+    assert m.sampler_.sv.exact
+    assert 0.5 < m.sampler_.sv.mh_acceptance_rate <= 1.0
     fc = m.forecast(10)
     assert np.all(np.isfinite(fc.mean()))
     lo, hi = fc.interval(0.9)
     assert np.all(hi >= lo)
+
+
+def test_sv_exact_flag_off_reproduces_prefix_sampler():
+    """sv_exact=False must skip the MH step (pre-fix behaviour)."""
+    _, y, _ = full_series(n=120, sigma=0.6, seed=8)
+    cfg = make_config(periods=[(12, 2)], lags=(1,), trend="spline", errors="sv",
+                      num_gfr=2, num_burnin=20, num_mcmc=30, seed=0)
+    cfg.errors.sv_exact = False
+    m = BBEATSx(cfg).fit(y)
+    assert not m.sampler_.sv.exact
+    assert m.sampler_.sv.mh_proposals == 0
+    fc = m.forecast(5)
+    assert np.all(np.isfinite(fc.mean()))

@@ -10,13 +10,14 @@ package remains importable, runnable, and testable.
 This is a *reference* implementation: a compact-but-genuine Bayesian backfitting
 BART with single grow/prune Metropolis-Hastings moves per tree and conjugate
 Gaussian leaves.  It reproduces the semantics BBEATSx depends on -- a shared,
-continuously-updated residual; per-observation precision weights with the
-``y_i ~ N(mu, sigma^2 / w_i)`` convention; piecewise-constant (extrapolation-
+continuously-updated residual; per-observation variance multipliers with the
+``y_i ~ N(mu, sigma^2 * w_i)`` convention; piecewise-constant (extrapolation-
 flatlining) predictions -- but it is **not** performance-optimized and is not a
 drop-in replacement for the production C++ sampler.
 
-Weight convention matches stochtree: ``variance_weights`` are *precision*
-multipliers, i.e. ``Var(eps_i) = sigma^2 / w_i``.
+This matches the observed low-level behaviour of stochtree 0.4.4.  Its public
+documentation instead describes precision weights, so the analytic backend
+contract test must be revisited whenever the stochtree version changes.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from typing import List, Optional, Union
 import numpy as np
 
 BACKEND_NAME = "numpy-reference"
+NUMPY_VERSION = np.__version__
 
 
 # --------------------------------------------------------------------------- RNG
@@ -40,7 +42,7 @@ class RNG:
 
 # ----------------------------------------------------------------------- Dataset
 class Dataset:
-    """Stores covariates and optional per-observation precision weights."""
+    """Stores covariates and optional per-observation variance multipliers."""
 
     def __init__(self) -> None:
         self._X: Optional[np.ndarray] = None
@@ -399,7 +401,7 @@ class ForestSampler:
         X = dataset.get_covariates()
         w = dataset.get_variance_weights()
         sigma2 = global_config.get_global_error_variance()
-        prec = (np.ones(X.shape[0]) if w is None else w) / sigma2
+        prec = (np.ones(X.shape[0]) if w is None else 1.0 / w) / sigma2
         tau = float(forest_config.get_leaf_model_scale()[0, 0])
         alpha = forest_config.get_alpha()
         beta = forest_config.get_beta()

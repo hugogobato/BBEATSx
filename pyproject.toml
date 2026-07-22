@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "bbeatsx"
 version = "0.1.0"
-description = "Bayesian Basis Expansion Analysis for Time Series (BBEATSx): an interpretable trend+seasonality+generic BART decomposition with component-level calibrated uncertainty."
+description = "Bayesian Basis Expansion Analysis for Time Series (BBEATSx): an interpretable additive BART decomposition with component-level uncertainty."
 readme = "bbeatsx/README.md"
 requires-python = ">=3.10"
 license = { text = "See repository LICENSE" }
@@ -16,13 +16,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The production forest sampler. When absent, bbeatsx falls back to its numpy
-# reference backend (see bbeatsx/backend/_numpy_backend.py).
-stochtree = ["stochtree>=0.1"]
+# BBEATSx's low-level observation-weight contract is validated against exactly
+# this release. Upgrade only together with the backend conformance tests.
+stochtree = ["stochtree==0.4.4"]
 pandas = ["pandas>=1.5"]
 plot = ["matplotlib>=3.5"]
 test = ["pytest>=7.0", "pandas>=1.5"]
-all = ["stochtree>=0.1", "pandas>=1.5", "matplotlib>=3.5", "pytest>=7.0"]
+all = ["stochtree==0.4.4", "pandas>=1.5", "matplotlib>=3.5", "pytest>=7.0"]
 
 [tool.setuptools.packages.find]
 include = ["bbeatsx*"]

@@ -1,6 +1,6 @@
 """The BBEATSx Gibbs engine (plan §1.2) -- the heart of the project.
 
-A single backfitting MCMC updates the trend, seasonality and generic blocks plus
+A single backfitting MCMC updates the configured additive mean blocks plus
 the error-variance model, all sharing **one** :class:`Residual` and one global
 variance state.  Each block, in turn, adds its current prediction back into the
 shared residual, draws itself conditional on that partial residual, and subtracts
@@ -20,7 +20,7 @@ state, which the forecaster (:mod:`bbeatsx.forecast`) and interpretability tools
 from __future__ import annotations
 
 import warnings
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 from scipy.stats import chi2
@@ -39,6 +39,7 @@ class BBEATSxSampler:
         self.fs = fs
         self.config = config
         self.backend = bk.BACKEND
+        self.backend_version = bk.BACKEND_VERSION
 
         # ---- standardize the target (priors live on the unit-variance scale)
         y = np.asarray(fs.y, dtype=float).ravel()
@@ -62,16 +63,50 @@ class BBEATSxSampler:
         if self.sv_mode:
             self.sv = SVSampler(
                 self.n, phi=config.errors.sv_phi, sigma_h=config.errors.sv_sigma_h,
-                mu_prior_var=config.errors.sv_mu_prior_var)
+                mu_prior_var=config.errors.sv_mu_prior_var,
+                exact=getattr(config.errors, "sv_exact", True))
 
         # ---- build blocks
         self.trend_block = self._build_trend()
         self.seasonal_block = self._build_forest_block(
             "seasonal", fs.X_se, config.seasonal.tree_prior, fs.names_se)
-        self.generic_block = self._build_forest_block(
-            "generic", fs.X_ge, config.generic.resolved_tree_prior(), fs.names_ge)
-        self.blocks = [b for b in (self.trend_block, self.seasonal_block,
-                                   self.generic_block) if b is not None]
+        self.generic_block = None
+        self.exogenous_block = None
+        self.autoregressive_block = None
+        if config.generic.component_layout == "combined":
+            self.generic_block = self._build_forest_block(
+                "generic", fs.X_ge, config.generic.resolved_tree_prior(), fs.names_ge)
+            self.atomic_component_names = ("trend", "seasonal", "generic")
+        elif config.generic.component_layout == "split":
+            priors = config.generic.resolved_component_priors(
+                has_exogenous=fs.X_ex.shape[1] > 0,
+                has_autoregressive=fs.X_ar.shape[1] > 0,
+            )
+            if "exogenous" in priors:
+                self.exogenous_block = self._build_forest_block(
+                    "exogenous", fs.X_ex, priors["exogenous"], fs.names_ex)
+            if "autoregressive" in priors:
+                self.autoregressive_block = self._build_forest_block(
+                    "autoregressive", fs.X_ar, priors["autoregressive"], fs.names_ar)
+            self.atomic_component_names = (
+                "trend", "seasonal", "exogenous", "autoregressive")
+        else:
+            raise ValueError(
+                "generic.component_layout must be 'combined' or 'split', got "
+                f"{config.generic.component_layout!r}"
+            )
+
+        self.component_blocks = {
+            "trend": self.trend_block,
+            "seasonal": self.seasonal_block,
+            "generic": self.generic_block,
+            "exogenous": self.exogenous_block,
+            "autoregressive": self.autoregressive_block,
+        }
+        # Systematic scan: structural blocks first, history/state correction last.
+        self.blocks = [self.component_blocks[name]
+                       for name in self.atomic_component_names
+                       if self.component_blocks[name] is not None]
 
         # ---- prepare (residualize) every block
         for b in self.blocks:
@@ -84,6 +119,7 @@ class BBEATSxSampler:
         self.sigma2_draws_: List[float] = []        # homoscedastic noise per draw
         self.sigma2_t_draws_: List[np.ndarray] = []  # SV in-sample variance paths
         self.h_last_draws_: List[float] = []         # SV terminal log-variance
+        self.mu_draws_: List[float] = []             # SV level per draw (F-2.4-1)
         self.current_sigma2 = 1.0
         self.current_sigma2_t = np.ones(self.n)
         self._fitted = False
@@ -167,6 +203,7 @@ class BBEATSxSampler:
             if self.sv_mode:
                 self.sigma2_t_draws_.append(self.current_sigma2_t.copy())
                 self.h_last_draws_.append(float(self.sv.h[-1]))
+                self.mu_draws_.append(float(self.sv.mu))
             else:
                 self.sigma2_draws_.append(self.current_sigma2)
 
@@ -182,8 +219,54 @@ class BBEATSxSampler:
         # in-sample-invariant, restores extrapolation slope-consistency.
         if isinstance(self.trend_block, ConjugateTrendBlock):
             self.trend_block.apply_deslope()
+        self._fix_level_gauge()
         self._fitted = True
         return self
+
+    # ------------------------------------------------------------ level gauge
+    def _fix_level_gauge(self) -> None:
+        """Fix the additive-level gauge (config ``level_gauge``).
+
+        The additive model identifies the component sum but not how a constant
+        is split among its blocks.  For every retained draw, subtract each
+        non-trend block's in-sample mean and add all of those offsets to the
+        trend.  This handles either the legacy three-block layout or the split
+        trend/seasonal/exogenous/autoregressive layout.  The sum is unchanged
+        draw-by-draw, so the posterior predictive is untouched; the same
+        in-sample offsets are reused out of sample (:mod:`bbeatsx.forecast`).
+
+        Note this constrains the forest *output*, which is what identifiability
+        requires; centering the seasonal *design matrix*
+        (:attr:`SeasonalConfig.sum_to_zero`) does not, because a sum-of-trees on
+        centered features still has an arbitrary output level from its leaves.
+        """
+        S = self.num_draws
+        zero = np.zeros(S)
+        deviation_names = self.atomic_component_names[1:]
+        if self.config.level_gauge != "trend" or S == 0:
+            self.level_offsets_ = {name: zero.copy() for name in deviation_names}
+            return
+
+        def _block_mean(block) -> np.ndarray:
+            if block is None:
+                return np.zeros(S)
+            draws = np.asarray(block.in_sample_draws(), dtype=float)
+            if draws.size == 0 or draws.shape[1] != S:
+                return np.zeros(S)
+            return draws.mean(axis=0)
+
+        self.level_offsets_ = {
+            name: _block_mean(self.component_blocks[name])
+            for name in deviation_names
+        }
+
+    def level_offsets(self) -> Dict[str, np.ndarray]:
+        """Per-draw ``(S,)`` level offsets moved into the trend by the gauge."""
+        off = getattr(self, "level_offsets_", None)
+        if off is None:  # sampler fitted before the gauge existed
+            z = np.zeros(self.num_draws)
+            return {name: z.copy() for name in self.atomic_component_names[1:]}
+        return off
 
     # ----------------------------------------------------------- diagnostics
     def backfitting_residual_error(self) -> float:
@@ -201,13 +284,26 @@ class BBEATSxSampler:
                 else len(self.sigma2_draws_))
 
     def in_sample_components(self):
-        """Return dict of ``(n, S)`` standardized component prediction arrays."""
-        out = {}
-        out["trend"] = self.trend_block.in_sample_draws()
-        out["seasonal"] = (self.seasonal_block.in_sample_draws()
-                           if self.seasonal_block is not None
-                           else np.zeros((self.n, self.num_draws)))
-        out["generic"] = (self.generic_block.in_sample_draws()
-                          if self.generic_block is not None
-                          else np.zeros((self.n, self.num_draws)))
+        """Return dict of ``(n, S)`` standardized component prediction arrays.
+
+        The arrays are reported in the gauge selected by ``config.level_gauge``
+        (see :meth:`_fix_level_gauge`); under the default ``"trend"`` gauge the
+        seasonal and generic arrays are exactly mean-zero over the training rows
+        and the trend carries the level.  The row sum is gauge-invariant.
+        """
+        out = {
+            "trend": np.asarray(self.trend_block.in_sample_draws(), dtype=float)
+        }
+        for name in self.atomic_component_names[1:]:
+            block = self.component_blocks[name]
+            out[name] = (np.asarray(block.in_sample_draws(), dtype=float)
+                         if block is not None
+                         else np.zeros((self.n, self.num_draws)))
+        off = self.level_offsets()
+        out["trend"] = out["trend"] + sum(
+            (off[name] for name in self.atomic_component_names[1:]),
+            np.zeros(self.num_draws),
+        )
+        for name in self.atomic_component_names[1:]:
+            out[name] = out[name] - off[name]
         return out

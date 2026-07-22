@@ -3,9 +3,9 @@
 #   python3 -m venv .venv && . .venv/bin/activate
 #   pip install -r requirements.txt
 #
-# stochtree provides the production C++ forest sampler. If it cannot be
-# installed, bbeatsx automatically falls back to its pure-numpy reference
-# backend (the rest of the stack is unchanged).
+# stochtree provides the production C++ forest sampler. The exact pin is
+# deliberate: BBEATSx's low-level observation-weight contract is tested against
+# 0.4.4 and must be re-audited before an upgrade.
 
 numpy>=1.23
 scipy>=1.9
@@ -14,4 +14,4 @@ scikit-learn
 pybind11
 pytest>=7.0
 matplotlib>=3.5
-stochtree
+stochtree==0.4.4

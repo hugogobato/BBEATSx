@@ -24,7 +24,12 @@ def generate_dgp1(n: int = 200, seed: int = 0) -> Tuple[np.ndarray, np.ndarray, 
         ar[i] = 0.5 * ar[i-1] + rng.normal(0, 0.4)
         
     y = trend + seasonal + ar
-    return t, y, {"trend": trend, "seasonal": seasonal, "generic": ar}
+    return t, y, {"trend": trend, "seasonal": seasonal, "generic": ar,
+                  # Metadata for the *predictable* generic estimand (see
+                  # `generic_predictable_in/out`): the generic block can only
+                  # recover E[g_t | past], never the innovation on top of it.
+                  "generic_ar": ar, "generic_exog": np.zeros(n),
+                  "generic_ar_coefs": np.array([0.5]), "generic_innov_sd": 0.4}
 
 def generate_dgp2(n: int = 250, seed: int = 0) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
     """DGP 2: Nonlinear Trend + Multi-Period Seasonality + AR(2) + Volatility Clustered (SV) Noise
@@ -53,7 +58,10 @@ def generate_dgp2(n: int = 250, seed: int = 0) -> Tuple[np.ndarray, np.ndarray, 
         ar[i] = 0.5 * ar[i-1] - 0.25 * ar[i-2] + eps[i]
         
     y = trend + seasonal + ar
-    return t, y, {"trend": trend, "seasonal": seasonal, "generic": ar, "sigma": sig}
+    return t, y, {"trend": trend, "seasonal": seasonal, "generic": ar, "sigma": sig,
+                  "generic_ar": ar, "generic_exog": np.zeros(n),
+                  "generic_ar_coefs": np.array([0.5, -0.25]),
+                  "generic_innov_sd": sig}
 
 def generate_dgp3(n: int = 200, seed: int = 0) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """DGP 3: Structural Break Regime + Exogenous Covariate + Homoscedastic Noise
@@ -84,7 +92,10 @@ def generate_dgp3(n: int = 200, seed: int = 0) -> Tuple[np.ndarray, np.ndarray, 
         
     generic = exog_effect + ar
     y = trend + seasonal + generic
-    return t, y, exog_data, {"trend": trend, "seasonal": seasonal, "generic": generic}
+    return t, y, exog_data, {"trend": trend, "seasonal": seasonal, "generic": generic,
+                             "generic_ar": ar, "generic_exog": exog_effect,
+                             "generic_ar_coefs": np.array([0.4]),
+                             "generic_innov_sd": 0.5}
 
 def generate_dgp4(n: int = 80, seed: int = 0) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
     """DGP 4: Short + Noisy
@@ -99,7 +110,12 @@ def generate_dgp4(n: int = 80, seed: int = 0) -> Tuple[np.ndarray, np.ndarray, D
     noise = rng.normal(0, 1.2, n)
     
     y = trend + seasonal + noise
-    return t, y, {"trend": trend, "seasonal": seasonal, "generic": noise}
+    return t, y, {"trend": trend, "seasonal": seasonal, "generic": noise,
+                  # The "generic" component here is *pure white noise*: it has no
+                  # predictable part at all, and the DGP4 configuration gives the
+                  # model no generic features, so this block is reported N/A.
+                  "generic_ar": noise, "generic_exog": np.zeros(n),
+                  "generic_ar_coefs": np.array([]), "generic_innov_sd": 1.2}
 
 def generate_dgp5(n: int = 200, seed: int = 0) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """DGP 5: Linear Trend + Seasonality + Linear Exogenous Covariate + Homoscedastic Noise
@@ -123,7 +139,10 @@ def generate_dgp5(n: int = 200, seed: int = 0) -> Tuple[np.ndarray, np.ndarray, 
         
     generic = exog_effect + ar
     y = trend + seasonal + generic
-    return t, y, exog_data, {"trend": trend, "seasonal": seasonal, "generic": generic}
+    return t, y, exog_data, {"trend": trend, "seasonal": seasonal, "generic": generic,
+                             "generic_ar": ar, "generic_exog": exog_effect,
+                             "generic_ar_coefs": np.array([0.5]),
+                             "generic_innov_sd": 0.4}
 
 def generate_dgp6(n: int = 200, seed: int = 0) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """DGP 6: Linear Trend + Seasonality + Nonlinear Exogenous Covariate + Homoscedastic Noise
@@ -147,7 +166,10 @@ def generate_dgp6(n: int = 200, seed: int = 0) -> Tuple[np.ndarray, np.ndarray, 
         
     generic = exog_effect + ar
     y = trend + seasonal + generic
-    return t, y, exog_data, {"trend": trend, "seasonal": seasonal, "generic": generic}
+    return t, y, exog_data, {"trend": trend, "seasonal": seasonal, "generic": generic,
+                             "generic_ar": ar, "generic_exog": exog_effect,
+                             "generic_ar_coefs": np.array([0.5]),
+                             "generic_innov_sd": 0.4}
 
 
 # =====================================================================
@@ -220,35 +242,188 @@ def evaluate_forecast(actual: np.ndarray, fc_result, y_train: np.ndarray, level:
 # 3. Component-level and Decomposition UQ Metrics - Plan §3.2
 # =====================================================================
 
-def evaluate_component_fidelity(
-    true_comps: Dict[str, np.ndarray], 
-    pred_comps: Dict[str, np.ndarray], 
-    offset: int = 0,
-    level: float = 0.9
-) -> Dict[str, Dict[str, float]]:
-    """Evaluates component recovery RMSE and empirical coverage.
-    true_comps: dict of true component arrays (length N)
-    pred_comps: dict of predicted component draws (length N_eff, draws)
-    offset: integer marking how many starting rows were dropped in prediction
+def _band_metrics(true: np.ndarray, draws: np.ndarray, level: float) -> Dict[str, float]:
+    """Component metrics in both the *raw* and the *identification-invariant* gauge.
+
+    An additive decomposition determines the sum of the components but not how a
+    constant is split among them, so a component's raw error confounds two very
+    different things: whether the model recovered the component's *shape*, and
+    which of the observationally equivalent level splits the model and the DGP
+    each happen to use.  We therefore report both, plus the exact decomposition
+    that links them.
+
+    With ``d_t = mean_s pred_t^(s) - true_t``, ``offset = mean_t d_t`` and
+    ``shape_rmse^2 = mean_t (d_t - offset)^2``:
+
+        ``rmse^2 = offset^2 + shape_rmse^2``   (exact)
+
+    The ``shape_*`` metrics recenter *both* the truth and every posterior draw
+    over the evaluation window, so they are invariant to the level gauge and
+    measure recovery of the component's actual movement.
     """
+    a = (1.0 - level) / 2.0
+    mean_pred = draws.mean(axis=1)
+    d = mean_pred - true
+    offset = float(np.mean(d))
+
+    lo, hi = np.quantile(draws, a, axis=1), np.quantile(draws, 1.0 - a, axis=1)
+    rmse = float(np.sqrt(np.mean(d ** 2)))
+    coverage = float(np.mean((true >= lo) & (true <= hi)))
+
+    # Gauge-invariant view: recenter truth and draws on their own window means.
+    true_c = true - true.mean()
+    draws_c = draws - mean_pred.mean()
+    lo_c, hi_c = np.quantile(draws_c, a, axis=1), np.quantile(draws_c, 1.0 - a, axis=1)
+    shape_rmse = float(np.sqrt(np.mean((d - offset) ** 2)))
+    shape_coverage = float(np.mean((true_c >= lo_c) & (true_c <= hi_c)))
+
+    return {
+        "rmse": rmse, "coverage": coverage, "offset": offset,
+        "shape_rmse": shape_rmse, "shape_coverage": shape_coverage,
+        "width": float(np.mean(hi - lo)), "true_sd": float(np.std(true)),
+    }
+
+
+_NA_METRICS = {k: float("nan") for k in
+               ("rmse", "coverage", "offset", "shape_rmse", "shape_coverage",
+                "width", "true_sd")}
+
+
+def evaluate_component_fidelity(
+    true_comps: Dict[str, np.ndarray],
+    pred_comps: Dict[str, np.ndarray],
+    offset: int = 0,
+    level: float = 0.9,
+    available: Dict[str, bool] = None,
+) -> Dict[str, Dict[str, float]]:
+    """Evaluate component recovery: raw, gauge-invariant, and their decomposition.
+
+    Parameters
+    ----------
+    true_comps : dict
+        True component arrays (length ``N``) from the DGP generator.
+    pred_comps : dict
+        Posterior component draws, ``(N_eff, draws)``.
+    offset : int
+        Number of leading rows dropped in prediction (the model's lag burn-in).
+    level : float
+        Nominal central-band level (the study uses 0.95).
+    available : dict, optional
+        Per-component flag; a component the *configuration* does not model at all
+        (e.g. the DGP4 generic block, where ``lags=()`` and there is no exogenous
+        input, so the block does not exist) is reported as NaN rather than as a
+        zero-width band scoring 0.0 coverage against pure noise.
+    """
+    available = available or {}
     results = {}
     for name in ["trend", "seasonal", "generic"]:
-        if name in true_comps and name in pred_comps:
-            pc = pred_comps[name]
-            tc = true_comps[name][offset : offset + pc.shape[0]]
-            
-            # Point-estimate RMSE (posterior mean)
-            mean_pred = pc.mean(axis=1)
-            rmse = np.sqrt(np.mean((tc - mean_pred) ** 2))
-            
-            # Interval coverage
-            a = (1.0 - level) / 2.0
-            lo = np.quantile(pc, a, axis=1)
-            hi = np.quantile(pc, 1.0 - a, axis=1)
-            coverage = np.mean((tc >= lo) & (tc <= hi))
-            
-            results[name] = {"rmse": float(rmse), "coverage": float(coverage)}
+        if name not in true_comps or name not in pred_comps:
+            continue
+        if not available.get(name, True):
+            results[name] = dict(_NA_METRICS)
+            continue
+        pc = np.asarray(pred_comps[name], dtype=float)
+        tc = np.asarray(true_comps[name], dtype=float)[offset: offset + pc.shape[0]]
+        results[name] = _band_metrics(tc, pc, level)
     return results
+
+
+# ---------------------------------------------------------------------
+# The *predictable* generic estimand
+# ---------------------------------------------------------------------
+# Several DGPs define their "generic" component as a realised noise path
+# (e.g. DGP1's ar_t = 0.5 ar_{t-1} + eps_t).  Scoring a posterior band against
+# that path asks the model to have predicted eps_t, which is by construction
+# impossible: no estimator, however good, can beat an RMSE floor of sd(eps).
+# The estimable object is the conditional mean E[g_t | past, x_t], which is what
+# the generic block actually targets; the innovation belongs to the observation
+# noise and is carried by the *predictive* interval, not the component band.
+
+def _companion(coefs: np.ndarray) -> np.ndarray:
+    """Companion matrix of an AR(p) with coefficients ``coefs``."""
+    p = len(coefs)
+    A = np.zeros((p, p))
+    A[0, :] = coefs
+    if p > 1:
+        A[1:, :-1] = np.eye(p - 1)
+    return A
+
+
+def generic_predictable_in(comps: Dict[str, np.ndarray]) -> np.ndarray:
+    """One-step conditional mean ``E[g_t | F_{t-1}, x_t]`` over the full series.
+
+    Equals the (known) exogenous effect at ``t`` plus the AR forecast built from
+    realised lags.  The first ``p`` entries are set to NaN and are never used:
+    the model drops at least that many rows as lag burn-in.
+    """
+    ar = np.asarray(comps["generic_ar"], dtype=float)
+    exog = np.asarray(comps["generic_exog"], dtype=float)
+    coefs = np.asarray(comps["generic_ar_coefs"], dtype=float)
+    n, p = ar.shape[0], len(coefs)
+    psi = exog.astype(float).copy()
+    for j, phi in enumerate(coefs, start=1):
+        psi[j:] += phi * ar[:-j] if j < n else 0.0
+    if p:
+        psi[:p] = np.nan
+    return psi
+
+
+def generic_predictable_out(comps: Dict[str, np.ndarray], n_train: int,
+                            H: int) -> np.ndarray:
+    """``h``-step conditional mean ``E[g_{T+h} | F_T, x_{T+h}]`` for ``h = 1..H``.
+
+    ``T = n_train - 1`` is the forecast origin.  The exogenous part is known into
+    the future (it is supplied to the forecaster); the autoregressive part decays
+    as the ``h``-th power of the companion matrix.
+    """
+    ar = np.asarray(comps["generic_ar"], dtype=float)
+    exog = np.asarray(comps["generic_exog"], dtype=float)
+    coefs = np.asarray(comps["generic_ar_coefs"], dtype=float)
+    p = len(coefs)
+    out = exog[n_train: n_train + H].astype(float).copy()
+    if p == 0:
+        return out                      # white noise: nothing is predictable
+    A = _companion(coefs)
+    state = ar[n_train - p: n_train][::-1]      # (ar_T, ar_{T-1}, ...)
+    Ah = np.eye(p)
+    for h in range(H):
+        Ah = Ah @ A
+        out[h] += float((Ah @ state)[0])
+    return out
+
+
+def generic_rmse_floor(comps: Dict[str, np.ndarray], n_train: int = None,
+                       H: int = None, window: slice = None) -> float:
+    """Irreducible RMSE of *any* estimator of the generic component.
+
+    In sample this is the innovation sd (the one-step-unpredictable part).  Out of
+    sample it also accumulates over the horizon: for an AR(p) the ``h``-step error
+    variance is ``sigma^2 * sum_{i<h} psi_i^2`` with ``psi_i = [A^i]_{11}``.  The
+    returned value is the root-mean-square of those per-step floors, directly
+    comparable with the reported RMSE.
+    """
+    sd = comps["generic_innov_sd"]
+    coefs = np.asarray(comps["generic_ar_coefs"], dtype=float)
+    if H is None:                                       # in-sample
+        sd_arr = np.asarray(sd, dtype=float)
+        if sd_arr.ndim == 0:
+            return float(sd_arr)
+        return float(np.sqrt(np.mean(sd_arr[window] ** 2))) if window is not None \
+            else float(np.sqrt(np.mean(sd_arr ** 2)))
+    sd_arr = np.asarray(sd, dtype=float)
+    sigma2 = (float(sd_arr) ** 2 if sd_arr.ndim == 0
+              else float(np.mean(sd_arr[n_train: n_train + H] ** 2)))
+    p = len(coefs)
+    if p == 0:
+        return float(np.sqrt(sigma2))
+    A = _companion(coefs)
+    Ah, var_h = np.eye(p), []
+    cum = 0.0
+    for _ in range(H):
+        cum += float(Ah[0, 0]) ** 2
+        var_h.append(sigma2 * cum)
+        Ah = Ah @ A
+    return float(np.sqrt(np.mean(var_h)))
 
 
 # =====================================================================

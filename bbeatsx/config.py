@@ -13,12 +13,14 @@ recursive multi-step forecasting.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import List, Literal, Optional, Sequence
+from dataclasses import dataclass, field, replace
+from typing import Dict, List, Literal, Optional, Sequence
 
 TrendMode = Literal["tree", "linear", "spline", "tvp"]
 ErrorMode = Literal["homo", "sv"]
 MultiStepMode = Literal["recursive", "direct"]
+LevelGauge = Literal["trend", "none"]
+ComponentLayout = Literal["combined", "split"]
 
 
 @dataclass
@@ -172,16 +174,38 @@ class GenericConfig:
     ``asymmetric=True`` activates the identifiability prior (concept §3.5): fewer
     trees, a tighter leaf scale and a steeper depth penalty so the block makes
     only small corrections and does not steal trend/seasonality.
+
+    ``component_layout="combined"`` retains the original single forest on
+    ``[y_lags, x]``.  ``"split"`` instead fits additive exogenous and
+    autoregressive forests.  The split is useful for predictive attribution but
+    is not an identification repair: raw outcome lags still contain past trend,
+    seasonality, and exogenous signal.  When both sub-blocks are present their
+    tree counts partition the original generic budget, and their leaf scale is
+    frozen at the original value, so the split does not silently double model
+    capacity or aggregate prior variance.
     """
 
     lags: Sequence[int] = (1,)
     exog: List[str] = field(default_factory=list)
     # Exogenous covariates that are known into the future (the "-x" features).
     future_exog: List[str] = field(default_factory=list)
+    component_layout: ComponentLayout = "combined"
     asymmetric: bool = True
     tree_prior: TreePrior = field(
         default_factory=lambda: TreePrior(num_trees=50, beta=2.0)
     )
+
+    def __post_init__(self) -> None:
+        if self.component_layout not in ("combined", "split"):
+            raise ValueError(
+                "GenericConfig.component_layout must be 'combined' or 'split'"
+            )
+        lag_values = tuple(int(lag) for lag in self.lags)
+        if any(lag <= 0 for lag in lag_values):
+            raise ValueError("GenericConfig.lags must contain positive integers")
+        if len(set(lag_values)) != len(lag_values):
+            raise ValueError("GenericConfig.lags must not contain duplicates")
+        self.lags = lag_values
 
     def resolved_tree_prior(self) -> TreePrior:
         """Return the (possibly asymmetric-tightened) tree prior for this block."""
@@ -201,6 +225,39 @@ class GenericConfig:
             sample_leaf_scale=tp.sample_leaf_scale,
         )
 
+    def resolved_component_priors(
+        self, *, has_exogenous: bool, has_autoregressive: bool
+    ) -> Dict[str, TreePrior]:
+        """Resolve forest priors without changing the generic capacity budget.
+
+        With only one active input group, that group receives the exact legacy
+        generic prior.  With both groups active, the legacy tree count is split
+        between them and the legacy per-tree leaf standard deviation is held
+        fixed.  Consequently ``m_ex + m_ar = m_generic`` and the leading
+        aggregate prior variance ``sum_c m_c * sigma_mu^2`` is preserved.
+        """
+        base = self.resolved_tree_prior()
+        active = [name for name, present in (
+            ("exogenous", has_exogenous),
+            ("autoregressive", has_autoregressive),
+        ) if present]
+        if not active:
+            return {}
+        if len(active) == 1:
+            return {active[0]: base}
+        if base.num_trees < 2:
+            raise ValueError(
+                "split generic layout with exogenous and autoregressive inputs "
+                "requires at least two resolved generic trees"
+            )
+        m_ex = (base.num_trees + 1) // 2
+        m_ar = base.num_trees - m_ex
+        leaf_scale = base.resolved_leaf_scale()
+        return {
+            "exogenous": replace(base, num_trees=m_ex, leaf_scale=leaf_scale),
+            "autoregressive": replace(base, num_trees=m_ar, leaf_scale=leaf_scale),
+        }
+
 
 @dataclass
 class ErrorConfig:
@@ -219,6 +276,10 @@ class ErrorConfig:
     sv_phi: float = 0.95
     sv_sigma_h: float = 0.15
     sv_mu_prior_var: float = 10.0
+    # F-2.4-8 (thm:svfix): MH-correct the FFBS h-draw so the sweep targets the
+    # exact SV posterior (neither the exact nor the Omori-augmented posterior is
+    # invariant for the uncorrected composition). False = pre-fix sampler.
+    sv_exact: bool = True
 
 
 @dataclass
@@ -243,6 +304,20 @@ class BBEATSxConfig:
     errors: ErrorConfig = field(default_factory=ErrorConfig)
     mcmc: MCMCConfig = field(default_factory=MCMCConfig)
     multistep: MultiStepMode = "recursive"
+    # Identification convention ("gauge") for the additive level.  An additive
+    # decomposition y = F_tr + F_se + F_ge + eps determines the *sum* but not the
+    # split of any constant between the blocks, so the reported components are
+    # only interpretable once a gauge is fixed.
+    #
+    # - ``"trend"`` (**default**): the trend carries the whole level.  Each
+    #   retained draw's seasonal and generic in-sample means are subtracted from
+    #   those blocks and folded into the trend, making the reported seasonal and
+    #   generic components exactly mean-zero in sample.  This is an exact
+    #   reparameterization applied *after* sampling: the sum of the components,
+    #   and hence every predictive quantity, is bit-for-bit unchanged.
+    # - ``"none"``: report the raw per-block forest output (pre-2026-07 behaviour,
+    #   in which the level floated freely between blocks).  Ablation only.
+    level_gauge: LevelGauge = "trend"
 
     def num_retained_draws(self) -> int:
         """Number of posterior draws kept after burn-in and thinning."""

@@ -1,9 +1,10 @@
 """BBEATSx -- Bayesian Basis Expansion Analysis for Time Series (exogenous).
 
-An interpretable trend + seasonality + generic decomposition whose blocks are
-Bayesian Additive Regression Tree ensembles (and an extrapolation-safe parametric
-trend), fit by one coherent backfitting MCMC over ``stochtree`` low-level
-primitives, delivering calibrated predictive intervals -- including per component.
+An interpretable additive decomposition whose correction blocks are Bayesian
+Additive Regression Tree ensembles (with an extrapolation-safe parametric trend),
+fit by one shared-residual sampler over ``stochtree`` low-level primitives. The
+legacy generic block can optionally be routed into separate exogenous and
+autoregressive forests.
 
 See ``BBEATSx_research_plan.md`` (Phase 1) for the design this package implements.
 """
@@ -11,7 +12,7 @@ See ``BBEATSx_research_plan.md`` (Phase 1) for the design this package implement
 from __future__ import annotations
 
 from .__about__ import __version__
-from .backend import BACKEND
+from .backend import BACKEND, BACKEND_VERSION
 from .config import (
     BBEATSxConfig,
     ErrorConfig,
@@ -35,6 +36,7 @@ from .sampler import BBEATSxSampler
 __all__ = [
     "__version__",
     "BACKEND",
+    "BACKEND_VERSION",
     "BBEATSx",
     "make_config",
     "BBEATSxConfig",

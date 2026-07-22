@@ -45,12 +45,15 @@ def config_from_dict(d: Dict[str, Any]) -> BBEATSxConfig:
     gen = d["generic"]
     generic = GenericConfig(
         lags=tuple(gen["lags"]), exog=gen["exog"], future_exog=gen["future_exog"],
+        component_layout=gen.get("component_layout", "combined"),
         asymmetric=gen["asymmetric"], tree_prior=TreePrior(**gen["tree_prior"]),
     )
     return BBEATSxConfig(
         trend=trend, seasonal=seasonal, generic=generic,
         errors=ErrorConfig(**d["errors"]), mcmc=MCMCConfig(**d["mcmc"]),
         multistep=d["multistep"],
+        # Runs saved before the level gauge existed used the free-floating split.
+        level_gauge=d.get("level_gauge", "none"),
     )
 
 
@@ -59,21 +62,21 @@ def save_run(sampler: BBEATSxSampler, path: str) -> None:
     base = path[:-4] if path.endswith(".npz") else path
     comps = sampler.in_sample_components()
     arrays = {
-        "trend": comps["trend"],
-        "seasonal": comps["seasonal"],
-        "generic": comps["generic"],
         "t_index": sampler.fs.t_index,
         "y_mean": np.array([sampler.y_mean_]),
         "y_std": np.array([sampler.y_std_]),
     }
+    arrays.update(comps)
     if sampler.sv_mode:
         arrays["sigma2_t"] = np.array(sampler.sigma2_t_draws_)
         arrays["h_last"] = np.array(sampler.h_last_draws_)
+        arrays["mu"] = np.array(sampler.mu_draws_)
     else:
         arrays["sigma2"] = np.array(sampler.sigma2_draws_)
     np.savez_compressed(base + ".npz", **arrays)
     with open(base + ".json", "w") as fh:
         json.dump({"backend": sampler.backend,
+                   "backend_version": sampler.backend_version,
                    "config": config_to_dict(sampler.config)}, fh, indent=2)
 
 
@@ -84,5 +87,6 @@ def load_run(path: str) -> Dict[str, Any]:
     with open(base + ".json") as fh:
         meta = json.load(fh)
     data["backend"] = meta["backend"]
+    data["backend_version"] = meta.get("backend_version", "unknown")
     data["config"] = config_from_dict(meta["config"])
     return data

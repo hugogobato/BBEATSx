@@ -56,18 +56,22 @@ def decomposition(sampler: BBEATSxSampler, level: float = 0.9) -> Dict[str, Band
     t = sampler.fs.t_index
     out = {}
     # The standardization mean is reported as part of the trend (the level).
+    # ``comps`` already carries the level gauge (config ``level_gauge``), so the
+    # seasonal and generic bands are deviations about zero and the trend band is
+    # the level: the decomposition shown here is identified, not one of the many
+    # observationally equivalent splits.
     out["trend"] = BandSummary.from_draws(t, mean + std * comps["trend"], level)
-    out["seasonal"] = BandSummary.from_draws(t, std * comps["seasonal"], level)
-    out["generic"] = BandSummary.from_draws(t, std * comps["generic"], level)
-    total = std * (comps["trend"] + comps["seasonal"] + comps["generic"]) + mean
+    for name in sampler.atomic_component_names[1:]:
+        out[name] = BandSummary.from_draws(t, std * comps[name], level)
+    total_std = sum((comps[name] for name in sampler.atomic_component_names),
+                    np.zeros_like(comps["trend"]))
+    total = std * total_std + mean
     out["fitted"] = BandSummary.from_draws(t, total, level)
     return out
 
 
 def _forest_block(sampler: BBEATSxSampler, block: str) -> ForestBlock:
-    b = {"trend": sampler.trend_block,
-         "seasonal": sampler.seasonal_block,
-         "generic": sampler.generic_block}.get(block)
+    b = sampler.component_blocks.get(block)
     if not isinstance(b, ForestBlock):
         raise ValueError(
             f"block '{block}' is not a forest block (it is {type(b).__name__}); "
@@ -158,7 +162,7 @@ def plot_decomposition(sampler: BBEATSxSampler, level: float = 0.9, ax=None):
     import matplotlib.pyplot as plt  # lazy
 
     bands = decomposition(sampler, level)
-    keys = ["fitted", "trend", "seasonal", "generic"]
+    keys = ["fitted", *sampler.atomic_component_names]
     if ax is None:
         _, ax = plt.subplots(len(keys), 1, figsize=(9, 8), sharex=True)
     for a, k in zip(np.atleast_1d(ax), keys):

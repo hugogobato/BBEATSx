@@ -12,12 +12,21 @@
 /real_life_application/FR
 /real_life_application/NP
 /real_life_application/PJM
+/real_life_application/epf_data
+/real_life_application/interpretability_showcase
+/real_life_application/NBEATSx_Code
+/real_life_application/Results
+
 
 /real_life_application_v2/BE
 /real_life_application_v2/DE
 /real_life_application_v2/FR
 /real_life_application_v2/NP
 /real_life_application_v2/PJM
+/real_life_application_v2/
+/Explanation/
+PAPER_WRITING_PLAN.md
+Prompt.txt
 
 # Python
 .venv/

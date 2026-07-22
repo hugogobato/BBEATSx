@@ -89,11 +89,15 @@ class ForestBlock:
 
     def set_obs_variance(self, var_t) -> None:
         if self.use_weights:
-            # stochtree weight convention: Var = sigma^2 / w with sigma^2 pinned
-            # to 1 under SV, so w_t = 1 / var_t.
+            # stochtree 0.4.4's compiled Gaussian sufficient statistics use
+            # ``1 / variance_weight`` as precision (despite public docs calling
+            # the input a precision weight).  Thus the stored value is the
+            # observation-variance multiplier.  The global variance is pinned
+            # to one under SV, so store ``var_t`` itself.  The numpy reference
+            # backend intentionally mirrors this observed low-level contract.
             var = np.full(self.n, float(var_t)) if np.isscalar(var_t) \
                 else np.asarray(var_t, dtype=float).ravel()
-            self.dataset.update_variance_weights(1.0 / var)
+            self.dataset.update_variance_weights(var)
 
     def sample(self, residual, global_config, rng, np_rng, keep: bool, gfr: bool,
                num_threads: int = 1) -> None:
